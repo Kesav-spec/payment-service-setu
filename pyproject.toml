@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# The test DB engine is a session-scoped fixture; fixtures and tests must
+# share one event loop or asyncpg connections created in one loop can't be
+# used from another ("attached to a different loop" errors).
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"

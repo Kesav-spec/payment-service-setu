@@ -64,3 +64,19 @@ async def test_missing_required_field_is_rejected(client):
     del payload["merchant_name"]
     resp = await client.post("/events", json=payload)
     assert resp.status_code == 422
+
+
+async def test_missing_merchant_id_is_rejected(client):
+    payload = event_payload()
+    del payload["merchant_id"]
+    resp = await client.post("/events", json=payload)
+    assert resp.status_code == 422
+
+
+async def test_malformed_json_body_is_rejected(client):
+    resp = await client.post(
+        "/events",
+        content=b"{not valid json",
+        headers={"content-type": "application/json"},
+    )
+    assert resp.status_code == 422

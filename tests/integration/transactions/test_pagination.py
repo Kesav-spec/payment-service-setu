@@ -6,6 +6,20 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 
+async def post_event(client, **overrides) -> dict:
+    payload = {
+        "event_id": str(uuid.uuid4()),
+        "merchant_id": "merchant_page_filter_test",
+        "merchant_name": "Pagination Filter Test Merchant",
+        "amount": "60.00",
+        "currency": "INR",
+    }
+    payload.update(overrides)
+    resp = await client.post("/events", json=payload)
+    assert resp.status_code in (200, 201), resp.text
+    return resp.json()
+
+
 async def seed_transactions(client, count: int, merchant_code: str) -> list[str]:
     t0 = datetime.now(timezone.utc)
     txn_ids = []
@@ -114,3 +128,123 @@ async def test_unknown_merchant_returns_empty_page_not_error(client):
     body = resp.json()
     assert body["items"] == []
     assert body["next_cursor"] is None
+
+
+async def test_settlement_status_filter(client):
+    merchant_code = "merchant_page_settlement"
+    t0 = datetime.now(timezone.utc)
+
+    unsettled_txn = str(uuid.uuid4())
+    await post_event(
+        client, event_type="payment_initiated", transaction_id=unsettled_txn, merchant_id=merchant_code, timestamp=t0.isoformat()
+    )
+
+    settled_txn = str(uuid.uuid4())
+    await post_event(
+        client, event_type="payment_initiated", transaction_id=settled_txn, merchant_id=merchant_code, timestamp=t0.isoformat()
+    )
+    await post_event(
+        client,
+        event_type="payment_processed",
+        transaction_id=settled_txn,
+        merchant_id=merchant_code,
+        timestamp=(t0 + timedelta(minutes=1)).isoformat(),
+    )
+    await post_event(
+        client,
+        event_type="settled",
+        transaction_id=settled_txn,
+        merchant_id=merchant_code,
+        timestamp=(t0 + timedelta(minutes=2)).isoformat(),
+    )
+
+    resp = await client.get(
+        "/transactions", params={"merchant_id": merchant_code, "settlement_status": "SETTLED"}
+    )
+    assert resp.status_code == 200
+    ids = [item["id"] for item in resp.json()["items"]]
+    assert ids == [settled_txn]
+
+
+async def test_is_discrepant_filter(client):
+    merchant_code = "merchant_page_discrepant"
+    t0 = datetime.now(timezone.utc)
+
+    clean_txn = str(uuid.uuid4())
+    await post_event(
+        client, event_type="payment_initiated", transaction_id=clean_txn, merchant_id=merchant_code, timestamp=t0.isoformat()
+    )
+
+    discrepant_txn = str(uuid.uuid4())
+    await post_event(
+        client,
+        event_type="payment_initiated",
+        transaction_id=discrepant_txn,
+        merchant_id=merchant_code,
+        timestamp=t0.isoformat(),
+    )
+    await post_event(
+        client,
+        event_type="settled",
+        transaction_id=discrepant_txn,
+        merchant_id=merchant_code,
+        timestamp=(t0 + timedelta(minutes=1)).isoformat(),
+    )  # settled_before_processed -> is_discrepant
+
+    resp = await client.get("/transactions", params={"merchant_id": merchant_code, "is_discrepant": True})
+    assert resp.status_code == 200
+    ids = [item["id"] for item in resp.json()["items"]]
+    assert ids == [discrepant_txn]
+
+
+async def test_from_date_to_date_filters_bound_first_event_at(client):
+    merchant_code = "merchant_page_daterange"
+    base = datetime(2026, 2, 1, tzinfo=timezone.utc)
+
+    early_txn = str(uuid.uuid4())
+    await post_event(
+        client, event_type="payment_initiated", transaction_id=early_txn, merchant_id=merchant_code, timestamp=base.isoformat()
+    )
+    mid_txn = str(uuid.uuid4())
+    await post_event(
+        client,
+        event_type="payment_initiated",
+        transaction_id=mid_txn,
+        merchant_id=merchant_code,
+        timestamp=(base + timedelta(days=2)).isoformat(),
+    )
+    late_txn = str(uuid.uuid4())
+    await post_event(
+        client,
+        event_type="payment_initiated",
+        transaction_id=late_txn,
+        merchant_id=merchant_code,
+        timestamp=(base + timedelta(days=4)).isoformat(),
+    )
+
+    resp = await client.get(
+        "/transactions",
+        params={
+            "merchant_id": merchant_code,
+            "from_date": (base + timedelta(days=1)).isoformat(),
+            "to_date": (base + timedelta(days=3)).isoformat(),
+        },
+    )
+    assert resp.status_code == 200
+    ids = [item["id"] for item in resp.json()["items"]]
+    assert ids == [mid_txn]
+
+
+async def test_limit_below_minimum_is_rejected(client):
+    resp = await client.get("/transactions", params={"limit": 0})
+    assert resp.status_code == 422
+
+
+async def test_limit_above_maximum_is_rejected(client):
+    resp = await client.get("/transactions", params={"limit": 101})
+    assert resp.status_code == 422
+
+
+async def test_limit_at_maximum_boundary_is_accepted(client):
+    resp = await client.get("/transactions", params={"limit": 100})
+    assert resp.status_code == 200

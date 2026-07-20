@@ -178,3 +178,38 @@ async def test_results_are_ordered_by_last_event_at_desc(client):
     assert resp.status_code == 200
     ordered_ids = [row["transaction_id"] for row in resp.json()]
     assert ordered_ids == list(reversed(txn_ids))
+
+
+async def test_transaction_matching_two_detection_branches_appears_twice(client):
+    """UNION ALL, not UNION: a transaction that's both flagged at ingest time
+    (is_discrepant) and independently matches a staleness branch at read
+    time is two distinct findings, not deduplicated into one row.
+
+    A transaction whose first-ever event is payment_processed (not
+    payment_initiated) is flagged is_discrepant=True with reason
+    "initiated_missing" at ingest time. That same event also leaves it
+    PROCESSED + UNSETTLED with a stale last_event_at, which independently
+    matches the "processed_not_settled" staleness branch.
+    """
+    merchant_code = "merchant_disc_dual_branch"
+    txn_id = str(uuid.uuid4())
+    old = datetime.now(timezone.utc) - timedelta(hours=48)
+
+    await post_event(
+        client,
+        event_type="payment_processed",
+        transaction_id=txn_id,
+        merchant_id=merchant_code,
+        amount="42.00",
+        timestamp=old.isoformat(),
+    )
+
+    resp = await client.get(
+        "/reconciliation/discrepancies", params={"merchant_id": merchant_code, "stale_after_hours": 24}
+    )
+    assert resp.status_code == 200
+    rows = [row for row in resp.json() if row["transaction_id"] == txn_id]
+
+    assert len(rows) == 2
+    reasons = {row["discrepancy_reason"] for row in rows}
+    assert reasons == {"initiated_missing", "processed_not_settled"}

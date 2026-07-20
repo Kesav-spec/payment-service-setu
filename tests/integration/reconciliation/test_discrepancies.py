@@ -91,3 +91,90 @@ async def test_merchant_filter_scopes_discrepancies(client):
 async def test_stale_after_hours_must_be_at_least_one(client):
     resp = await client.get("/reconciliation/discrepancies", params={"stale_after_hours": 0})
     assert resp.status_code == 422
+
+
+async def test_conflicting_transitions_appears_in_discrepancies(client):
+    merchant_code = "merchant_disc_conflict"
+    txn_id = str(uuid.uuid4())
+    t0 = datetime.now(timezone.utc)
+
+    await post_event(client, event_type="payment_initiated", transaction_id=txn_id, merchant_id=merchant_code, amount="12.00", timestamp=t0.isoformat())
+    await post_event(client, event_type="payment_processed", transaction_id=txn_id, merchant_id=merchant_code, amount="12.00", timestamp=(t0 + timedelta(minutes=5)).isoformat())
+    await post_event(client, event_type="payment_failed", transaction_id=txn_id, merchant_id=merchant_code, amount="12.00", timestamp=(t0 + timedelta(minutes=10)).isoformat())
+
+    resp = await client.get("/reconciliation/discrepancies", params={"merchant_id": merchant_code})
+    assert resp.status_code == 200
+    reasons = {row["transaction_id"]: row["discrepancy_reason"] for row in resp.json()}
+    assert reasons[txn_id] == "conflicting_transitions"
+
+
+async def test_settled_before_processed_appears_in_discrepancies(client):
+    merchant_code = "merchant_disc_early_settle"
+    txn_id = str(uuid.uuid4())
+    t0 = datetime.now(timezone.utc)
+
+    await post_event(client, event_type="payment_initiated", transaction_id=txn_id, merchant_id=merchant_code, amount="8.00", timestamp=t0.isoformat())
+    await post_event(client, event_type="settled", transaction_id=txn_id, merchant_id=merchant_code, amount="8.00", timestamp=(t0 + timedelta(minutes=5)).isoformat())
+
+    resp = await client.get("/reconciliation/discrepancies", params={"merchant_id": merchant_code})
+    assert resp.status_code == 200
+    reasons = {row["transaction_id"]: row["discrepancy_reason"] for row in resp.json()}
+    assert reasons[txn_id] == "settled_before_processed"
+
+
+async def test_initiated_missing_appears_in_discrepancies(client):
+    merchant_code = "merchant_disc_missing_init"
+    txn_id = str(uuid.uuid4())
+    t0 = datetime.now(timezone.utc)
+
+    await post_event(client, event_type="payment_processed", transaction_id=txn_id, merchant_id=merchant_code, amount="9.00", timestamp=t0.isoformat())
+
+    resp = await client.get("/reconciliation/discrepancies", params={"merchant_id": merchant_code})
+    assert resp.status_code == 200
+    reasons = {row["transaction_id"]: row["discrepancy_reason"] for row in resp.json()}
+    assert reasons[txn_id] == "initiated_missing"
+
+
+async def test_unknown_merchant_returns_empty_list_not_error(client):
+    resp = await client.get("/reconciliation/discrepancies", params={"merchant_id": "does-not-exist"})
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_limit_caps_number_of_results(client):
+    merchant_code = "merchant_disc_limit"
+    old = datetime.now(timezone.utc) - timedelta(hours=48)
+
+    for _ in range(3):
+        await post_event(
+            client, event_type="payment_initiated", transaction_id=str(uuid.uuid4()), merchant_id=merchant_code, amount="1.00", timestamp=old.isoformat()
+        )
+
+    resp = await client.get(
+        "/reconciliation/discrepancies", params={"merchant_id": merchant_code, "stale_after_hours": 24, "limit": 2}
+    )
+    assert resp.status_code == 200
+    assert len(resp.json()) == 2
+
+
+async def test_results_are_ordered_by_last_event_at_desc(client):
+    merchant_code = "merchant_disc_order"
+    old = datetime.now(timezone.utc) - timedelta(hours=48)
+
+    txn_ids = [str(uuid.uuid4()) for _ in range(3)]
+    for i, txn_id in enumerate(txn_ids):
+        await post_event(
+            client,
+            event_type="payment_initiated",
+            transaction_id=txn_id,
+            merchant_id=merchant_code,
+            amount="1.00",
+            timestamp=(old + timedelta(minutes=i)).isoformat(),
+        )
+
+    resp = await client.get(
+        "/reconciliation/discrepancies", params={"merchant_id": merchant_code, "stale_after_hours": 24}
+    )
+    assert resp.status_code == 200
+    ordered_ids = [row["transaction_id"] for row in resp.json()]
+    assert ordered_ids == list(reversed(txn_ids))

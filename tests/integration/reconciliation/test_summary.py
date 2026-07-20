@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 async def post_event(client, **overrides) -> str:
@@ -86,3 +86,105 @@ async def test_unknown_merchant_returns_empty_list_not_error(client):
     )
     assert resp.status_code == 200
     assert resp.json() == []
+
+
+async def test_from_date_to_date_filters_scope_included_transactions(client):
+    merchant_code = "merchant_recon_daterange"
+    base = datetime(2026, 3, 1, tzinfo=timezone.utc)
+
+    await post_event(client, merchant_id=merchant_code, amount="10.00", timestamp=base.isoformat())
+    await post_event(
+        client, merchant_id=merchant_code, amount="20.00", timestamp=(base + timedelta(days=2)).isoformat()
+    )
+    await post_event(
+        client, merchant_id=merchant_code, amount="40.00", timestamp=(base + timedelta(days=4)).isoformat()
+    )
+
+    resp = await client.get(
+        "/reconciliation/summary",
+        params={
+            "group_by": "status",
+            "merchant_id": merchant_code,
+            "from_date": (base + timedelta(days=1)).isoformat(),
+            "to_date": (base + timedelta(days=3)).isoformat(),
+        },
+    )
+    assert resp.status_code == 200
+    groups = {g["group_key"]: g for g in resp.json()}
+
+    assert groups["INITIATED"]["total_transactions"] == 1
+    assert float(groups["INITIATED"]["total_amount"]) == 20.00
+
+
+async def test_settled_and_unsettled_amounts_are_reported(client):
+    merchant_code = "merchant_recon_settlement"
+    t0 = datetime.now(timezone.utc)
+
+    await post_event(client, merchant_id=merchant_code, event_type="payment_initiated", amount="15.00", timestamp=t0.isoformat())
+
+    settled_txn = str(uuid.uuid4())
+    await post_event(
+        client,
+        merchant_id=merchant_code,
+        transaction_id=settled_txn,
+        event_type="payment_initiated",
+        amount="25.00",
+        timestamp=t0.isoformat(),
+    )
+    await post_event(
+        client,
+        merchant_id=merchant_code,
+        transaction_id=settled_txn,
+        event_type="payment_processed",
+        amount="25.00",
+        timestamp=(t0 + timedelta(minutes=1)).isoformat(),
+    )
+    await post_event(
+        client,
+        merchant_id=merchant_code,
+        transaction_id=settled_txn,
+        event_type="settled",
+        amount="25.00",
+        timestamp=(t0 + timedelta(minutes=2)).isoformat(),
+    )
+
+    resp = await client.get("/reconciliation/summary", params={"group_by": "merchant", "merchant_id": merchant_code})
+    assert resp.status_code == 200
+    group = resp.json()[0]
+
+    assert group["settled_count"] == 1
+    assert float(group["settled_amount"]) == 25.00
+    assert group["unsettled_count"] == 1
+    assert float(group["unsettled_amount"]) == 15.00
+
+
+async def test_discrepant_count_and_amount_are_reported(client):
+    merchant_code = "merchant_recon_discrepant"
+    t0 = datetime.now(timezone.utc)
+
+    await post_event(client, merchant_id=merchant_code, event_type="payment_initiated", amount="5.00", timestamp=t0.isoformat())
+
+    discrepant_txn = str(uuid.uuid4())
+    await post_event(
+        client,
+        merchant_id=merchant_code,
+        transaction_id=discrepant_txn,
+        event_type="payment_initiated",
+        amount="35.00",
+        timestamp=t0.isoformat(),
+    )
+    await post_event(
+        client,
+        merchant_id=merchant_code,
+        transaction_id=discrepant_txn,
+        event_type="settled",
+        amount="35.00",
+        timestamp=(t0 + timedelta(minutes=1)).isoformat(),
+    )  # settled_before_processed -> is_discrepant
+
+    resp = await client.get("/reconciliation/summary", params={"group_by": "merchant", "merchant_id": merchant_code})
+    assert resp.status_code == 200
+    group = resp.json()[0]
+
+    assert group["discrepant_count"] == 1
+    assert float(group["discrepant_amount"]) == 35.00

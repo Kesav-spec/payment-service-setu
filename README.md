@@ -2,6 +2,8 @@
 
 An async FastAPI service that ingests payment lifecycle events from an external source system, maintains a current-state view of each transaction, and exposes reconciliation endpoints to detect inconsistencies between payment processing and settlement.
 
+**Live deployment:** https://payment-service-setu.onrender.com/ (interactive docs at `/docs`)
+
 ## 1. Overview
 
 The service has three responsibilities:
@@ -65,7 +67,7 @@ tests/
   integration/          # Full HTTP-to-Postgres tests, grouped by resource
 docker/
   docker-compose.yml     # Local Postgres container
-postman/                # Placeholder — currently empty
+Dockerfile               # Builds the FastAPI app image (not wired into docker-compose.yml)
 ```
 
 The `routers` / `services` / `repositories` split exists to keep SQL, business rules, and HTTP concerns independently testable and independently replaceable — e.g. the reconciliation SQL can change without touching the router, and the state machine (`tests/unit/events/test_state_machine.py`) is tested without a database at all.
@@ -286,7 +288,8 @@ git clone <repository-url>
 cd payment-service
 
 cp .env.example .env
-# Edit .env if needed; default matches docker-compose:
+# Edit .env to match docker-compose's credentials (.env.example ships placeholder
+# user/password values, not the docker-compose default):
 # DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/payments
 
 python3.13 -m venv .venv
@@ -306,13 +309,19 @@ The API is then available at `http://localhost:8000`.
 
 ## 11. Docker Setup
 
-`docker/docker-compose.yml` provisions the **database only** — a single `postgres:16` service (`payment-db`), exposing `5432`, with a named volume (`postgres_data`) for persistence and default credentials matching `.env.example` (`postgres` / `postgres`, database `payments`).
+`docker/docker-compose.yml` provisions the **database only** — a single `postgres:16` service (`payment-db`), exposing `5432`, with a named volume (`postgres_data`) for persistence and credentials `postgres` / `postgres`, database `payments` (note: `.env.example` ships different placeholder credentials — see Section 10).
 
 ```bash
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-The application itself is not containerized in this repository — there is no `Dockerfile` for the FastAPI app. Locally it runs directly against the Dockerized Postgres instance via `uvicorn` (see Section 10). No deployment configuration for the app exists in this repository (see Section 13).
+A root-level `Dockerfile` builds the FastAPI app itself (`python:3.13-slim`, installs `requirements.txt`, runs `uvicorn app.main:app` on port `8000`):
+
+```bash
+docker build -t payment-service .
+```
+
+This image is not wired into `docker-compose.yml` (which provisions only Postgres), and no deployment/orchestration configuration (Render, ECS, Kubernetes, etc.) exists in this repository — see Section 13.
 
 ## 12. Testing
 
@@ -337,6 +346,6 @@ pytest
 - **`merchant_id` denormalization on `payment_events`** is kept consistent only by application logic (always written from the same event payload as `transaction_id`), not by a database constraint. Acceptable for a single ingestion code path; would need revisiting if a second write path were added.
 - **No outbox/webhook mechanism.** Reconciliation results are pull-only (`GET` endpoints); there's no push notification when a transaction becomes discrepant.
 - **Staleness thresholds (`stale_after_hours`) are query-time parameters, not configurable per merchant** — a single global default (24h) applies unless overridden per request.
-- **No deployment configuration exists in this repository.** There is no `Dockerfile`, no infrastructure-as-code, and no platform-specific config (Render, ECS, or otherwise) — only the local Postgres dependency is Dockerized (Section 11). The service would need a container image and/or platform configuration added before it could run anywhere outside local development.
+- **No deployment configuration is tracked in this repository.** The service is live on Render at https://payment-service-setu.onrender.com/, but the build/start commands and environment variables for that deployment are configured in the Render dashboard, not committed here as infrastructure-as-code.
 - **`amount`/`currency` are stored per-event and per-transaction independently**, with no cross-currency handling — reconciliation aggregates assume a single currency is being summed per group; mixed-currency merchants would need explicit currency-aware aggregation.
-- **Postman collection is an empty placeholder** and not currently usable for manual API exploration.
+- **No Postman collection.** The `postman/` directory has been removed; `/docs` (FastAPI's generated OpenAPI UI) is the practical option for manual API exploration.

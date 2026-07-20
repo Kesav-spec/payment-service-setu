@@ -41,7 +41,6 @@ There is no separate "domain object" layer between services and the ORM — serv
 | Migrations | Alembic |
 | Validation | Pydantic v2 / pydantic-settings |
 | Local database | Docker Compose (Postgres 16 container) |
-| Deployment target | Render |
 | Testing | pytest, pytest-asyncio, httpx (ASGI transport), against a real Postgres test database |
 
 ## 4. Project Structure
@@ -303,7 +302,7 @@ python scripts/load_sample_events.py   # loads data/sample_events.json (10k+ eve
 uvicorn app.main:app --reload
 ```
 
-The API is then available at `http://localhost:8000` (interactive docs at `/docs`).
+The API is then available at `http://localhost:8000`.
 
 ## 11. Docker Setup
 
@@ -313,20 +312,9 @@ The API is then available at `http://localhost:8000` (interactive docs at `/docs
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-The application itself is not containerized in this repository — there is no `Dockerfile` for the FastAPI app. Locally it runs directly against the Dockerized Postgres instance via `uvicorn` (see Section 10); in deployment, Render runs it as a native Python web service rather than from a container image (see Section 12).
+The application itself is not containerized in this repository — there is no `Dockerfile` for the FastAPI app. Locally it runs directly against the Dockerized Postgres instance via `uvicorn` (see Section 10). No deployment configuration for the app exists in this repository (see Section 13).
 
-## 12. Deployment
-
-The service is deployed to **Render** as a native Python **Web Service** (not a Docker-based service, since no `Dockerfile` is committed):
-
-- **Build command:** `pip install -r requirements.txt && alembic upgrade head`
-- **Start command:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-- **Required environment variables:**
-  - `DATABASE_URL` — an `asyncpg`-style connection string (`postgresql+asyncpg://...`) pointing at a managed Postgres instance (e.g. Render Postgres).
-
-Render supplies `PORT` automatically; no other runtime configuration is required. Running `alembic upgrade head` as part of the build step keeps schema state in sync with each deploy rather than requiring a manual migration step.
-
-## 13. Testing
+## 12. Testing
 
 - **Framework:** pytest with `pytest-asyncio` (`asyncio_mode = "auto"`, session-scoped event loop) and `httpx.AsyncClient` against the FastAPI app via `ASGITransport` — no mocking of the database.
 - **Test database:** a separate real Postgres database (`payments_test`), created on demand, with schema built directly from `app.models` (`Base.metadata.create_all`) rather than via Alembic, and truncated between tests (not transaction rollback, since the code under test commits itself).
@@ -341,15 +329,14 @@ Run with:
 pytest
 ```
 
-## 14. Assumptions and Tradeoffs
+## 13. Assumptions and Tradeoffs
 
-- **No authentication/authorization.** Every endpoint is open. A production deployment would need API-key or OAuth-based auth on `POST /events` at minimum, and likely merchant-scoped access control on the read endpoints.
 - **No rate limiting or request-size limits** on `POST /events`.
 - **Cursor pagination has no total count.** `GET /transactions` deliberately omits a total row count to avoid a separate, expensive `COUNT(*)` query on every page — a standard keyset-pagination tradeoff, but it means UIs can't render "page N of M."
 - **Cursor tokens are unsigned.** They are base64-encoded, not HMAC-signed. A forged cursor can only reposition within the same filtered/authorized result set (nothing a filter wouldn't otherwise return), so this was accepted as-is; signing would be the hardening step if that stopped being true (e.g. once per-caller authorization is introduced).
 - **`merchant_id` denormalization on `payment_events`** is kept consistent only by application logic (always written from the same event payload as `transaction_id`), not by a database constraint. Acceptable for a single ingestion code path; would need revisiting if a second write path were added.
 - **No outbox/webhook mechanism.** Reconciliation results are pull-only (`GET` endpoints); there's no push notification when a transaction becomes discrepant.
 - **Staleness thresholds (`stale_after_hours`) are query-time parameters, not configurable per merchant** — a single global default (24h) applies unless overridden per request.
-- **No containerized app deployment.** Only the local Postgres dependency is Dockerized; the FastAPI service itself runs as a native Render Web Service. A production system would likely containerize the app too, for environment parity between local, CI, and deployed instances.
+- **No deployment configuration exists in this repository.** There is no `Dockerfile`, no infrastructure-as-code, and no platform-specific config (Render, ECS, or otherwise) — only the local Postgres dependency is Dockerized (Section 11). The service would need a container image and/or platform configuration added before it could run anywhere outside local development.
 - **`amount`/`currency` are stored per-event and per-transaction independently**, with no cross-currency handling — reconciliation aggregates assume a single currency is being summed per group; mixed-currency merchants would need explicit currency-aware aggregation.
-- **Postman collection is an empty placeholder** and not currently usable for manual API exploration; `/docs` (FastAPI's generated OpenAPI UI) is the practical alternative.
+- **Postman collection is an empty placeholder** and not currently usable for manual API exploration.

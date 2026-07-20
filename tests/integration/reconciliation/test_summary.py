@@ -188,3 +188,87 @@ async def test_discrepant_count_and_amount_are_reported(client):
 
     assert group["discrepant_count"] == 1
     assert float(group["discrepant_amount"]) == 35.00
+
+
+async def test_from_date_filter_alone_is_a_lower_bound(client):
+    merchant_code = "merchant_recon_fromdate"
+    base = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+    await post_event(client, merchant_id=merchant_code, amount="10.00", timestamp=base.isoformat())
+    await post_event(
+        client, merchant_id=merchant_code, amount="20.00", timestamp=(base + timedelta(days=5)).isoformat()
+    )
+
+    resp = await client.get(
+        "/reconciliation/summary",
+        params={
+            "group_by": "status",
+            "merchant_id": merchant_code,
+            "from_date": (base + timedelta(days=2)).isoformat(),
+        },
+    )
+    assert resp.status_code == 200
+    groups = {g["group_key"]: g for g in resp.json()}
+
+    assert groups["INITIATED"]["total_transactions"] == 1
+    assert float(groups["INITIATED"]["total_amount"]) == 20.00
+
+
+async def test_to_date_filter_alone_is_an_upper_bound(client):
+    merchant_code = "merchant_recon_todate"
+    base = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+    await post_event(client, merchant_id=merchant_code, amount="10.00", timestamp=base.isoformat())
+    await post_event(
+        client, merchant_id=merchant_code, amount="20.00", timestamp=(base + timedelta(days=5)).isoformat()
+    )
+
+    resp = await client.get(
+        "/reconciliation/summary",
+        params={
+            "group_by": "status",
+            "merchant_id": merchant_code,
+            "to_date": (base + timedelta(days=2)).isoformat(),
+        },
+    )
+    assert resp.status_code == 200
+    groups = {g["group_key"]: g for g in resp.json()}
+
+    assert groups["INITIATED"]["total_transactions"] == 1
+    assert float(groups["INITIATED"]["total_amount"]) == 10.00
+
+
+async def test_merchant_filter_combined_with_group_by_merchant_yields_one_row(client):
+    """The redundant-but-valid combo: merchant_id already pins the result to
+    one merchant, and group_by=merchant groups by the same dimension --
+    should collapse to exactly one row scoped to that merchant, not error or
+    return every merchant.
+    """
+    m1, m2 = "merchant_recon_combo_a", "merchant_recon_combo_b"
+    await post_event(client, merchant_id=m1, amount="10.00")
+    await post_event(client, merchant_id=m1, amount="15.00")
+    await post_event(client, merchant_id=m2, amount="99.00")
+
+    resp = await client.get("/reconciliation/summary", params={"group_by": "merchant", "merchant_id": m1})
+    assert resp.status_code == 200
+    groups = resp.json()
+
+    assert len(groups) == 1
+    assert groups[0]["group_key"] == m1
+    assert groups[0]["total_transactions"] == 2
+    assert float(groups[0]["total_amount"]) == 25.00
+
+
+async def test_groups_are_ordered_by_group_key(client):
+    merchant_code = "merchant_recon_order"
+    # Inserted out of chronological order so a correctly-sorted result can't
+    # be explained by insertion order coinciding with it.
+    await post_event(client, merchant_id=merchant_code, timestamp="2026-06-03T10:00:00+00:00")
+    await post_event(client, merchant_id=merchant_code, timestamp="2026-06-01T10:00:00+00:00")
+    await post_event(client, merchant_id=merchant_code, timestamp="2026-06-02T10:00:00+00:00")
+
+    resp = await client.get("/reconciliation/summary", params={"group_by": "date", "merchant_id": merchant_code})
+    assert resp.status_code == 200
+    group_keys = [g["group_key"] for g in resp.json()]
+
+    assert group_keys == ["2026-06-01", "2026-06-02", "2026-06-03"]
